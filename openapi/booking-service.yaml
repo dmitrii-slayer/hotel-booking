@@ -1,0 +1,499 @@
+openapi: 3.0.3
+info:
+  title: Booking Service API
+  description: |
+    API бронирования отелей, аутентификации и администрирования пользователей.
+
+    Сервис выдаёт JWT (HS256, срок действия - 1 час) и оркестрирует сагу создания
+    бронирования с компенсацией при отказе Hotel Service.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8082
+    description: Прямой доступ к сервису
+  - url: http://localhost:8080
+    description: Через API Gateway
+
+tags:
+  - name: Аутентификация
+    description: Регистрация и вход пользователей
+  - name: Бронирования
+    description: Создание, просмотр и отмена бронирований
+  - name: Пользователи
+    description: Администрирование пользователей (только ADMIN)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          example: "ivan_petrov"
+        password:
+          type: string
+          minLength: 6
+          maxLength: 100
+          example: "secret123"
+        role:
+          type: string
+          enum: [USER, ADMIN]
+          example: USER
+
+    AuthRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: "ivan_petrov"
+        password:
+          type: string
+          example: "secret123"
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT-токен доступа (срок действия - 1 час)
+        tokenType:
+          type: string
+          example: Bearer
+        userId:
+          type: string
+          format: uuid
+        username:
+          type: string
+          example: "ivan_petrov"
+        role:
+          type: string
+          enum: [USER, ADMIN]
+        expiresAt:
+          type: string
+          format: date-time
+
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+          example: "ivan_petrov"
+        role:
+          type: string
+          example: USER
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateBookingRequest:
+      type: object
+      required: [startDate, endDate]
+      description: |
+        Требуется либо roomId, либо autoSelect=true.
+        При autoSelect=true поле roomId игнорируется - номер подбирается
+        по возрастанию times_booked среди свободных на запрошенные даты.
+      properties:
+        roomId:
+          type: string
+          format: uuid
+          example: "d473a3ef-f765-499f-9463-f2c101d94898"
+        autoSelect:
+          type: boolean
+          example: false
+        startDate:
+          type: string
+          format: date
+          example: "2027-02-01"
+        endDate:
+          type: string
+          format: date
+          example: "2027-02-05"
+        requestId:
+          type: string
+          description: >
+            Корреляционный идентификатор для идемпотентности.
+            Повторная доставка того же requestId возвращает существующую бронь.
+          example: "83dd2e4c-d88e-4e8e-b164-ece66fef6264"
+
+    BookingResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        username:
+          type: string
+        roomId:
+          type: string
+          format: uuid
+        roomNumber:
+          type: string
+          example: "101"
+        hotelId:
+          type: string
+          format: uuid
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        status:
+          type: string
+          enum: [PENDING, CONFIRMED, CANCELLED]
+          example: CONFIRMED
+        failureReason:
+          type: string
+          description: Причина отмены, заполняется при компенсации
+          example: "Номер занят на запрошенные даты"
+        requestId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PageResponseBookingResponse:
+      type: object
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookingResponse'
+        page:
+          type: integer
+          example: 0
+        size:
+          type: integer
+          example: 20
+        totalElements:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+        last:
+          type: boolean
+
+    ErrorDto:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: integer
+          example: 409
+        error:
+          type: string
+          example: "Conflict"
+        message:
+          type: string
+        path:
+          type: string
+          example: "/booking"
+        traceId:
+          type: string
+        details:
+          type: object
+          additionalProperties:
+            type: string
+
+paths:
+  /user/register:
+    post:
+      tags: [Аутентификация]
+      summary: Зарегистрировать пользователя
+      description: Создаёт пользователя и сразу выдаёт JWT-токен.
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: Пользователь зарегистрирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Ошибка валидации или имя уже занято
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDto'
+
+  /user/auth:
+    post:
+      tags: [Аутентификация]
+      summary: Авторизовать пользователя
+      operationId: authenticateUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRequest'
+      responses:
+        '200':
+          description: Токен выдан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Неверные учётные данные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDto'
+
+  /booking:
+    post:
+      tags: [Бронирования]
+      summary: Создать бронирование
+      description: |
+        Сага:
+        1. Локальная транзакция - бронь в статусе PENDING.
+        2. Удалённый вызов Hotel Service (тайм-аут, повторы, circuit breaker).
+        3. Успех - CONFIRMED; сбой - компенсация: CANCELLED + снятие блокировки.
+
+        Идемпотентно по requestId.
+      operationId: createBooking
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBookingRequest'
+      responses:
+        '200':
+          description: Бронирование создано (статус CONFIRMED или CANCELLED при компенсации)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+        '400':
+          description: Ошибка валидации
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDto'
+        '401':
+          description: Не авторизован
+
+  /bookings:
+    get:
+      tags: [Бронирования]
+      summary: История бронирований пользователя
+      description: Возвращает только бронирования текущего пользователя, с пагинацией.
+      operationId: getUserBookings
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING, CONFIRMED, CANCELLED]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: size
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: sort
+          in: query
+          schema:
+            type: string
+            default: createdAt
+      responses:
+        '200':
+          description: Список бронирований получен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageResponseBookingResponse'
+        '401':
+          description: Не авторизован
+
+  /booking/{bookingId}:
+    parameters:
+      - name: bookingId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Бронирования]
+      summary: Получить бронирование по идентификатору
+      description: Пользователь видит только свои бронирования; администратор - любые.
+      operationId: getBookingById
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Бронирование найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+        '403':
+          description: Бронирование принадлежит другому пользователю
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDto'
+        '404':
+          description: Бронирование не найдено
+    delete:
+      tags: [Бронирования]
+      summary: Отменить бронирование
+      description: Переводит в CANCELLED и снимает блокировку слота в Hotel Service.
+      operationId: cancelBooking
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Бронирование отменено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+        '409':
+          description: Отмена невозможна
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDto'
+
+  /users:
+    get:
+      tags: [Пользователи]
+      summary: Получить список пользователей
+      operationId: getAllUsers
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Список получен
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserResponse'
+        '403':
+          description: Требуется роль ADMIN
+
+  /user:
+    post:
+      tags: [Пользователи]
+      summary: Создать пользователя (ADMIN)
+      operationId: createUserByAdmin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: password
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [USER, ADMIN]
+      responses:
+        '200':
+          description: Пользователь создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '403':
+          description: Требуется роль ADMIN
+
+  /user/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Пользователи]
+      summary: Обновить данные пользователя (ADMIN)
+      operationId: updateUserByAdmin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: query
+          schema:
+            type: string
+        - name: password
+          in: query
+          schema:
+            type: string
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [USER, ADMIN]
+      responses:
+        '200':
+          description: Пользователь обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '404':
+          description: Пользователь не найден
+    delete:
+      tags: [Пользователи]
+      summary: Удалить пользователя (ADMIN)
+      operationId: deleteUserByAdmin
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Пользователь удалён
+        '404':
+          description: Пользователь не найден

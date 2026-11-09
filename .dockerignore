@@ -1,0 +1,13 @@
+target/
+**/target/
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+
+*.md
+
+openapi/
+
+*/src/test/
